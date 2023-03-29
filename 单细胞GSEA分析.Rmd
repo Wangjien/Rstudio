@@ -1,0 +1,208 @@
+---
+title: "单细胞GSEA分析"
+output: html_document
+date: "2023-03-29"
+---
+
+##############################################################################
+# 差异基因分析
+#############################################################################
+# 读入数据，并进行差异基因分析
+```{r error=FALSE,warning=FALSE}
+# library
+library(Seurat)
+library(org.Hs.eg.db)
+library(dplyr)
+library(tidyverse)
+library(patchwork)
+library(cowplot)
+library(msigdbr)
+library(fgsea)
+library(GSEABase)
+
+# load data
+load('/root/wangje/Project/刘老师/Myeloids/Data/Myeloids_CCA.RData')
+scRNA_seurat
+unique(scRNA_seurat$new_celltype)
+```
+```{r}
+DefaultAssay(scRNA_seurat) <- 'RNA'
+Idents(scRNA_seurat) <- scRNA_seurat$new_celltype
+
+Find_DEGs <- function(data,ident.1 = 'R_Post', ident.2 = 'R_Pre', group='Treat_assess'){
+  flist = list()
+  if(DefaultAssay(data) != 'RNA'){
+    DefaultAssay(data) = 'RNA'
+    Idents(data) = 'new_celltype'
+  } 
+  for(celltype in unique(data$new_celltype)){
+    print(celltype)
+    res = FindMarkers(
+      object = data,
+      ident.1 = ident.1,
+      ident.2 = ident.2,
+      group.by = group,
+      subset.ident = celltype,
+      only.pos = F
+    )
+    print(dim(res))
+    flist[[celltype]] <- res
+  }
+  return(flist)
+}
+
+# 分组进行比较
+R_Post_R_Pre <- Find_DEGs(data = scRNA_seurat, group = 'Treat_assess',ident.1 = 'R_Post', ident.2 = 'R_Pre')
+NR_Post_NR_Pre <- Find_DEGs(data = scRNA_seurat, ident.1 = 'NR_Post', ident.2 = 'NR_Pre',group = 'Treat_assess')
+NR_Post_R_Post <- Find_DEGs(data = scRNA_seurat, ident.1 = 'NR_Post', ident.2 = 'R_Post',group = 'Treat_assess')
+NR_Pre_R_Pre <- Find_DEGs(data = scRNA_seurat, ident.1 = 'NR_Pre', ident.2 = 'R_Pre',group = 'Treat_assess')
+
+```
+
+##########################################################################
+# 进行GSEA分析
+##########################################################################
+```{r}
+library(msigdbr)
+
+msigdbr_species()
+m_df = msigdbr(species = 'Homo sapiens')
+head(m_df)
+
+```
+* 查看基因集的类别
+```{r}
+df <- m_df %>% dplyr::distinct(gs_cat, gs_subcat) %>% dplyr::arrange(gs_cat, gs_subcat)
+head(df)
+
+```
+```{r}
+gsea_name <- m_df %>% dplyr::distinct(gs_name)
+nrow(gsea_name)
+head(gsea_name)
+```
+
+```{r}
+"HALLMARK_INTERFERON_GAMMA_RESPONSE" %in% gsea_name$gs_name
+"GOBP_ANTIGEN_PROCESSING_AND_PRESENTATION_OF_EXOGENOUS_PEPTIDE_ANTIGEN_VIA_MHC_CLASS_I" %in% gsea_name$gs_name
+
+```
+
+```{r}
+mdb <- msigdbr(species = 'Homo sapiens')
+mdb_sub <- mdb %>% filter(gs_name %in% c('HALLMARK_INTERFERON_GAMMA_RESPONSE','GOBP_ANTIGEN_PROCESSING_AND_PRESENTATION_OF_EXOGENOUS_PEPTIDE_ANTIGEN_VIA_MHC_CLASS_I'))
+
+mdb_sub %>% dplyr::distinct(gs_cat,gs_name)
+head(mdb_sub)
+```
+```{r}
+fgsea_sets <- mdb_sub %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets
+```
+```{r}
+R_Post_R_Pre_gsea <- gsea_analysis(R_Post_R_Pre, method = 'fgsea',fgsea_sets = fgsea_sets)
+```
+
+```{r}
+flist <- list()
+DEGs <- R_Post_R_Pre
+name = 1
+DEGs[[name]]$gene = rownames(DEGs[[name]])
+gesa_input = DEGs[[name]] %>% dplyr::select(gene,avg_log2FC) %>% arrange(desc(avg_log2FC)) 
+gsea_input = deframe(gesa_input)
+gg1 <- fgsea(fgsea_sets, stats = gsea_input, nperm = 1000)
+```
+
+
+```{r}
+geneset <- read.gmt('/root/wangje/Reference/GSEA_gmt/Human/h.all.v2023.1.Hs.symbols.gmt')
+gg <- GSEA(gsea_input, TERM2GENE=geneset,verbose=F,
+           pvalueCutoff=0.1, pAdjustMethod = "BH")
+geneset_plot <- c('HALLMARK_COAGULATION','HALLMARK_P53_PATHWAY')
+mycol <- pal_nejm()(8)
+gseaplot2(gg,geneSetID = geneset_plot,color = c('red','green'),c(1.5, 0.5, 1))
+
+
+```
+
+```{r}
+geneset %>% dplyr::distinct(term)
+```
+```{r}
+test <- as.data.frame(gg)
+head(test)
+colnames(test)
+```
+
+```{r}
+test1 <- m_df %>% dplyr::filter(gs_name %in% c('HALLMARK_INTERFERON_GAMMA_RESPONSE','GOBP_ANTIGEN_PROCESSING_AND_PRESENTATION_OF_PEPTIDE_ANTIGEN_VIA_MHC_CLASS_I'))
+TERM2GENE <- test1 %>% select(gs_name,gene_symbol) %>% dplyr::rename_with(~c('term','gene'),1:2)
+fgsea_sets <- test1 %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets
+```
+
+```{r}
+gsea_analysis <- function(DEGs, method='GSEAbase',TERM2GENE=NULL,fgsea_sets = NULL){
+    flist <- list()
+    if(typeof(DEGs) == 'list'){
+        for (name in names(DEGs)) {
+            print(name)
+            if(method == method){
+                  gsea_input = data.frame(Gene = rownames(DEGs[[name]]),logFC = DEGs[[name]]$avg_log2FC) %>% 
+                      arrange(desc(logFC))
+                  gg <- GSEA(gsea_input, TERM2GENE = TERM2GENE, pAdjustMethod = "BH", verbose = F)
+                  flis[[name]] <- gg
+            }else if(method == 'fgsea'){
+                DEGs[[name]]$gene = rownames(DEGs[[name]])
+                gesa_input = DEGs[[name]] %>% dplyr::select(gene,avg_log2FC) %>% arrange(desc(avg_log2FC)) 
+                gsea_input = deframe(gesa_input)
+                gg <- fgsea(fgsea_sets, stats = gsea_input, nperm = 1000)
+                flist[[name]] <- gg
+            }
+        }
+         return(flist)
+    }
+   
+}
+
+gsea_analysis(DEGs = R_Post_R_Pre, )
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
